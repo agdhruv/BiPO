@@ -24,6 +24,26 @@ def tokenize(
 
     Returns: a list of tokens
     """
+    # Use native chat template for Llama-3
+    if model_name == 'llama-3':
+        messages = [{"role": "system", "content": system_prompt}]
+        for user_input, model_output in conversation:
+            messages.append({"role": "user", "content": user_input})
+            if model_output is not None:
+                messages.append({"role": "assistant", "content": model_output})
+        
+        # If the last message has a model output, we add generation prompt only if there's no output
+        add_gen_prompt = conversation[-1][1] is None if conversation else True
+        tokens = tokenizer.apply_chat_template(
+            messages,
+            add_generation_prompt=add_gen_prompt,
+            tokenize=True
+        )
+        # Remove trailing EOS if no_final_eos and there was a model response
+        if no_final_eos and not add_gen_prompt and tokens[-1] == tokenizer.eos_token_id:
+            tokens = tokens[:-1]
+        return tokens
+    
     def _instruction_response_to_tokens(
         instruction, model_output=None, is_first_message=False, no_eos=False
     ):

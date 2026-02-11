@@ -15,15 +15,28 @@ def get_steering_vector(layer, ckp_epoch, vectors_path):
     print('Get steering vector from ', vector_path)
     return t.load(vector_path)
 
-def process_item( prompt: str, model: ModelWrapper, history: Tuple[str, Optional[str]], max_new_tokens: int) -> Dict[str, str]:
+def process_item( prompt: str, model: ModelWrapper, history: Tuple[str, Optional[str]], max_new_tokens: int, model_name: str = 'llama-2') -> Dict[str, str]:
     
     model_output = model.generate_text_with_conversation_history(
         history + [(prompt, None)], max_new_tokens=max_new_tokens
     )
     
+    # Extract response based on model type
+    if model_name == 'llama-3':
+        # Llama-3 uses <|start_header_id|>assistant<|end_header_id|> format
+        if "assistant" in model_output.lower():
+            extracted = model_output.split("assistant")[-1].strip()
+            # Remove any trailing special tokens
+            if "<|eot_id|>" in extracted:
+                extracted = extracted.split("<|eot_id|>")[0].strip()
+        else:
+            extracted = model_output
+    else:
+        extracted = model_output.split("[/INST]")[-1].strip()
+    
     return {
         "question": prompt,
-        "model_output": model_output.split("[/INST]")[-1].strip(),
+        "model_output": extracted,
         "raw_model_output": model_output,
     }
 
@@ -73,7 +86,7 @@ def test_steering(
             model.reset_all()
             model.set_add_activations(layer, multiplier * vector)
             conv_history = []
-            result = process_item(item, model, conv_history, max_new_tokens)
+            result = process_item(item, model, conv_history, max_new_tokens, model_name=model_name)
             results.append(result)
             if verbose:
                 print(item)
@@ -85,8 +98,8 @@ def test_steering(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--behavior", type=str, choices=["power-seeking", "wealth-seeking", "hallucination", "jailbreak"])
-    parser.add_argument("--model_name", type=str, choices=["llama-2", "mistral"])
+    parser.add_argument("--behavior", type=str, choices=["power-seeking", "wealth-seeking", "hallucination", "jailbreak", "traditional", "survival"])
+    parser.add_argument("--model_name", type=str, choices=["llama-2", "mistral", "llama-3"])
     parser.add_argument("--pretrained", action="store_true", default=False)
     parser.add_argument("--layer", type=int, required=True)
     parser.add_argument("--multipliers", nargs="+", type=float, required=True)

@@ -114,16 +114,22 @@ class ModelWrapper:
             self.model_name_path = f"meta-llama/Llama-2-7b-chat-hf"
         elif self.model_name == 'mistral':
             self.model_name_path = f"mistralai/Mistral-7B-Instruct-v0.2"
+        elif self.model_name == 'llama-3':
+            self.model_name_path = f"meta-llama/Llama-3.1-8B-Instruct"
         else:
             raise SystemExit("Unsupported model name: ", model_name)
         self.tokenizer = AutoTokenizer.from_pretrained(
             self.model_name_path, use_auth_token=token
         )
+        self.tokenizer.pad_token = self.tokenizer.eos_token
         self.model = AutoModelForCausalLM.from_pretrained(
             self.model_name_path, use_auth_token=token
         )
         self.model = self.model.to(self.device)
-        self.END_STR = t.tensor(self.tokenizer.encode("[/INST]")[1:]).to(self.device)
+        if self.model_name == 'llama-3':
+            self.END_STR = t.tensor(self.tokenizer.encode("<|eot_id|>")[1:]).to(self.device)
+        else:
+            self.END_STR = t.tensor(self.tokenizer.encode("[/INST]")[1:]).to(self.device)
         for i, layer in enumerate(self.model.model.layers):
             self.model.model.layers[i] = BlockOutputWrapper(
                 layer, self.model.lm_head, self.model.model.norm, self.tokenizer

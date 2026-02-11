@@ -38,7 +38,7 @@ def print_trainable_parameters(model):
     )
 
 class BlockWrapper(torch.nn.Module):
-    def __init__(self, block, vec=None):
+    def __init__(self, block, vec=None, hidden_size=4096):
         super().__init__()
         self.multiplier = 1.0
         self.block = block
@@ -46,11 +46,15 @@ class BlockWrapper(torch.nn.Module):
             self.vec = torch.nn.Parameter(vec)
         else:
             # Zero Init
-            self.vec = torch.nn.Parameter(torch.zeros(4096))
+            self.vec = torch.nn.Parameter(torch.zeros(hidden_size))
 
     def forward(self, *args, **kwargs):
         output = self.block(*args, **kwargs)
-        output = (output[0]  +  (self.multiplier * self.vec),) + output[1:]
+        # Handle both tuple and tensor outputs (transformers version dependent)
+        if isinstance(output, tuple):
+            output = (output[0] + (self.multiplier * self.vec),) + output[1:]
+        else:
+            output = output + (self.multiplier * self.vec)
         return output
 
     def set_multiplier(self, multiplier):
@@ -70,7 +74,7 @@ class ScriptArguments:
     # training parameters
     model_name_or_path: Optional[str] = field(
         default="meta-llama/Llama-2-7b-chat-hf",
-        metadata={"help": "we only support meta-llama/Llama-2-7b-chat-hf and mistralai/Mistral-7B-Instruct-v0.2"},
+        metadata={"help": "Supported: meta-llama/Llama-2-7b-chat-hf, mistralai/Mistral-7B-Instruct-v0.2, meta-llama/Llama-3.1-8B-Instruct"},
     )
     learning_rate: Optional[float] = field(default=5e-4, metadata={"help": "optimizer learning rate"})
     lr_scheduler_type: Optional[str] = field(default="cosine", metadata={"help": "the lr scheduler type"})
@@ -116,20 +120,34 @@ class ScriptArguments:
         },
     )
 
-def get_data(num_proc=1, behavior='power-seeking', train=True, template_name='llama-2'):
+def get_data(num_proc=1, behavior='power-seeking', train=True, template_name='llama-2', tokenizer=None):
     if train:
         dataset = load_dataset("csv", data_files=f"./data/{behavior}/train.csv", split='train')
     else:
         dataset = load_dataset("csv", data_files=f"./data/{behavior}/test.csv", split='train')
     original_columns = dataset.column_names
+    
     def return_prompt_and_responses(samples) -> Dict[str, str]:
         prompt = []
         for question in samples["question"]:
-            conv = get_conv_template(template_name)
-            conv.set_system_message(SYSTEM_PROMPT)
-            conv.append_message(conv.roles[0], question)
-            conv.append_message(conv.roles[1], None)
-            prompt.append(conv.get_prompt())
+            if template_name == 'llama-3' and tokenizer is not None:
+                # Use Llama-3's native chat template
+                messages = [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": question}
+                ]
+                prompt_text = tokenizer.apply_chat_template(
+                    messages, 
+                    add_generation_prompt=True, 
+                    tokenize=False
+                )
+                prompt.append(prompt_text)
+            else:
+                conv = get_conv_template(template_name)
+                conv.set_system_message(SYSTEM_PROMPT)
+                conv.append_message(conv.roles[0], question)
+                conv.append_message(conv.roles[1], None)
+                prompt.append(conv.get_prompt())
         return {
             "prompt": prompt,
             "chosen": [' ' + s for s in samples["matching"]],
@@ -147,12 +165,21 @@ if __name__ == "__main__":
     parser = HfArgumentParser(ScriptArguments)
     script_args = parser.parse_args_into_dataclasses()[0]
     set_seed(seed=11)
-    if script_args.model_name_or_path not in ['meta-llama/Llama-2-7b-chat-hf', 'mistralai/Mistral-7B-Instruct-v0.2']:
-        print(f'{script_args.model_name_or_path} is not in supported model list. We support meta-llama/Llama-2-7b-chat-hf and mistralai/Mistral-7B-Instruct-v0.2')
+    
+    SUPPORTED_MODELS = [
+        'meta-llama/Llama-2-7b-chat-hf', 
+        'mistralai/Mistral-7B-Instruct-v0.2',
+        'meta-llama/Llama-3.1-8B-Instruct'
+    ]
+    if script_args.model_name_or_path not in SUPPORTED_MODELS:
+        print(f'{script_args.model_name_or_path} is not in supported model list: {SUPPORTED_MODELS}')
+    
     if script_args.model_name_or_path == 'meta-llama/Llama-2-7b-chat-hf':
         template_name = 'llama-2'
     elif script_args.model_name_or_path == 'mistralai/Mistral-7B-Instruct-v0.2':
         template_name = 'mistral'
+    elif script_args.model_name_or_path == 'meta-llama/Llama-3.1-8B-Instruct':
+        template_name = 'llama-3'
     print('[Behavior:] ', script_args.behavior, '[Layer:] ', script_args.layer, '[Model:] ', script_args.model_name_or_path)
 
     # 1. load a pretrained model
@@ -160,7 +187,8 @@ if __name__ == "__main__":
         script_args.model_name_or_path,
         low_cpu_mem_usage=True,
     )
-    model.model.layers[script_args.layer] = BlockWrapper(model.model.layers[script_args.layer])
+    hidden_size = model.config.hidden_size
+    model.model.layers[script_args.layer] = BlockWrapper(model.model.layers[script_args.layer], hidden_size=hidden_size)
     model.config.use_cache = False
 
     if script_args.ignore_bias_buffers:
@@ -188,10 +216,10 @@ if __name__ == "__main__":
     print('Finish loading pre-trained models...')
 
     # 2. Load training dataset
-    train_dataset = get_data(behavior=script_args.behavior, train=True, template_name=template_name) 
+    train_dataset = get_data(behavior=script_args.behavior, train=True, template_name=template_name, tokenizer=tokenizer) 
 
     # 3. Load val dataset
-    test_dataset = get_data(behavior=script_args.behavior, train=False, template_name=template_name) 
+    test_dataset = get_data(behavior=script_args.behavior, train=False, template_name=template_name, tokenizer=tokenizer) 
     
     # 4. initialize training arguments:
     training_args = DPOConfig(
